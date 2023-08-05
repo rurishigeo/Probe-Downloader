@@ -1,5 +1,7 @@
 #![windows_subsystem = "windows"]   // 隐藏windows console
 
+use std::path::Path;
+use flashing::erase_all;
 use iced::executor;
 use iced::subscription;
 use iced::widget::{button, container, text, Column, combo_box};
@@ -24,8 +26,10 @@ struct DapDownloader {
     targets: combo_box::State<TargetMCU>,
     selected_target: Option<TargetMCU>,
     target_mcu: String,
+    target_selected_flag: bool,
     file_path: String,
     file_format: String,
+    text: String,
 }
 
 #[derive(Debug, Clone)]
@@ -49,8 +53,10 @@ impl Application for DapDownloader {
             targets: combo_box::State::new(TargetMCU::ALL.to_vec()),
             selected_target: None,
             target_mcu: String::new(),
-            file_path: String::from("Drag and drop a file here"),
+            target_selected_flag: false,
+            file_path: String::new(),
             file_format: String::new(),
+            text: String::from("Drag and drop a file here"),
         }, Command::none())
     }
 
@@ -61,55 +67,103 @@ impl Application for DapDownloader {
     fn update(&mut self, message: Message) -> Command<Message> {
         match message {
             Message::DropFile(event) => {
-                if let Event::Window(window::Event::FileDropped(path)) = event {
-                    // dbg!(path.clone());
-                    self.file_path = path.to_str().unwrap().to_string();
-                    // 取file_path的后缀名
-                    let path = std::path::Path::new(&self.file_path);
-                    match path.extension() {
-                        Some(ext) => {
-                            let ext = ext.to_str().unwrap().to_string();
-                            if ext == "bin" {
-                                self.file_format = String::from("bin");
-                            } else if ext == "hex" {
-                                self.file_format = String::from("hex");
-                            } else if ext == "elf" {
+                match self.target_selected_flag {
+                    false => {
+                        self.text = String::from("Please select a target MCU first");
+                        Command::none()
+                    }
+                    true => {
+                        let Event::Window(window::Event::FileDropped(path)) = event else { return Command::none() };
+                        self.file_path = path.to_str().unwrap().to_string();
+                        // self.text = self.file_path.clone();
+                        match Path::new(&self.file_path).extension() {
+                            Some(ext) => {
+                                let ext = ext.to_str().unwrap();
+                                match ext {
+                                    "bin" => {
+                                        self.file_format = String::from("bin");
+                                    }
+                                    "hex" => {
+                                        self.file_format = String::from("hex");
+                                    }
+                                    "elf" => {
+                                        self.file_format = String::from("elf");
+                                    }
+                                    _ => {
+                                        self.text = String::from("unsupported file format");
+                                    }
+                                }
+                            }
+                            None => {
                                 self.file_format = String::from("elf");
-                            } else {
-                                self.file_path = String::from("unsupported file format");
                             }
                         }
-                        None => {
-                            self.file_format = String::from("elf");
-                        }
+                        flash_target(self.target_mcu.clone(), self.file_path.clone(), self.file_format.clone());
+                        self.text = String::from("Flash target MCU successfully");
+                        Command::none()
                     }
-                    flash_target(self.target_mcu.clone(), self.file_path.clone(), self.file_format.clone());
                 }
-                Command::none()
             }
             Message::TargetSelected(target) => {
                 self.selected_target = Some(target);
                 self.targets.unfocus();
                 self.target_mcu = target.to_string();
+                self.target_selected_flag = true;
                 Command::none()
             }
             Message::EraseTarget => {
-                erase_target(self.target_mcu.clone());
-                Command::none()
+                match self.target_selected_flag {
+                    false => {
+                        // TODO: Popup a window to remind user to select a target MCU first
+                        Command::none()
+                    }
+                    true => {
+                        erase_target(self.target_mcu.clone());
+                        self.text = String::from("Erase target MCU successfully");
+                        Command::none()
+                    }
+                }
             }
             Message::FlashTarget => {
-                flash_target(self.target_mcu.clone(), self.file_path.clone(), self.file_format.clone());
-                Command::none()
+                match self.target_selected_flag {
+                    false => {
+                        // TODO: Popup a window to remind user to select a target MCU first
+                        Command::none()
+                    }
+                    true => {
+                        match self.file_path.is_empty() {
+                            true => {
+                                self.text = String::from("Please drop a file");
+                                Command::none()
+                            }
+                            false => {
+                                flash_target(self.target_mcu.clone(), self.file_path.clone(), self.file_format.clone());
+                                self.text = String::from("Flash target MCU successfully");
+                                Command::none()
+                            }
+                        }
+                    }
+                }
             }
             Message::ResetTarget => {
-                reset_target(self.target_mcu.clone());
-                Command::none()
+                match self.target_selected_flag {
+                    false => {
+                        // TODO: Popup a window to remind user to select a target MCU first
+                        Command::none()
+                    }
+                    true => {
+                        reset_target(self.target_mcu.clone());
+                        self.text = String::from("Reset target MCU successfully");
+                        Command::none()
+                    }
+                }
             }
         }
     }
 
     fn view(&self) -> Element<Message> {
 
+        let log = text(self.text.clone());
         let file_path = text(self.file_path.clone());
 
         let combo_box = combo_box(
@@ -144,6 +198,7 @@ impl Application for DapDownloader {
         let content = Column::new()
             .align_items(Alignment::Center)
             .spacing(20)
+            .push(log)
             .push(file_path)
             .push(combo_box)
             .push(btn_erase)
@@ -168,15 +223,15 @@ fn flash_target(target: String, path: String, format: String) {
     let probes = Probe::list_all();
     let probe = probes[0].open().unwrap();
     let mut session = probe.attach(target, Permissions::default()).unwrap();
-    flashing::erase_all(&mut session, Option::None).unwrap();
-    
-    match format.as_str() {
-        "bin" => flashing::download_file(&mut session, path, flashing::Format::Bin(BinOptions { base_address: None, skip: 0 })).unwrap(),
-        "hex" => flashing::download_file(&mut session, path, flashing::Format::Hex).unwrap(),
-        "elf" => flashing::download_file(&mut session, path, flashing::Format::Elf).unwrap(),
-        _ => (),
-    }
-    // flashing::download_file(&mut session, path, flashing::Format::Elf).unwrap();
+    erase_all(&mut session, None).unwrap();
+
+    let _res = match format.as_str() {
+        "bin" => flashing::download_file(&mut session, path, flashing::Format::Bin(BinOptions { base_address: None, skip: 0 })),
+        "hex" => flashing::download_file(&mut session, path, flashing::Format::Hex),
+        "elf" => flashing::download_file(&mut session, path, flashing::Format::Elf),
+        _ => Ok(()),
+    }.expect("TODO: panic message");
+
     let mut core = session.core(0).unwrap();
     core.reset().unwrap();
 }
@@ -195,7 +250,7 @@ fn erase_target(target: String) {
     let probes = Probe::list_all();
     let probe = probes[0].open().unwrap();
     let mut session = probe.attach(target, Permissions::default()).unwrap();
-    flashing::erase_all(&mut session, Option::None).unwrap();
+    erase_all(&mut session, None).unwrap();
 }
 
 
