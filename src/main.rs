@@ -12,7 +12,7 @@ use iced::Event;
 use iced::subscription;
 use iced::widget::{button, Column, combo_box, container, pick_list, Row, text};
 use iced::window;
-use probe_rs::{DebugProbeError, flashing, Permissions, Probe, ProbeCreationError};
+use probe_rs::{DebugProbeError, flashing, Permissions, Probe, ProbeCreationError, Session};
 use probe_rs::flashing::{BinOptions, FileDownloadError, FlashError};
 
 pub fn main() -> iced::Result {
@@ -95,7 +95,7 @@ impl Application for DapDownload {
     fn update(&mut self, message: Message) -> Command<Message> {
         match message {
             Message::ProbeSelected(probe) => {
-                self.probe_selected = Some(list_probe().iter().position(|r| r == probe.as_str()).unwrap());
+                self.probe_selected = Some(self.probe_list.iter().position(|r| r == probe.as_str()).unwrap());
                 Command::none()
             }
 
@@ -154,7 +154,14 @@ impl Application for DapDownload {
                             return Command::none();
                         }
                     };
-                    match erase_target(probe, target.to_string()) {
+                    let session = match probe_attach(probe, target.to_string()) {
+                        Ok(session) => session,
+                        Err(_) => {
+                            self.log_text = String::from("Can not attach to target!");
+                            return Command::none();
+                        }
+                    };
+                    match erase_target(session) {
                         Ok(_) => (),
                         Err(_) => {
                             self.log_text = String::from("Erase failed!");
@@ -189,7 +196,14 @@ impl Application for DapDownload {
                             return Command::none();
                         }
                     };
-                    match flash_target(probe, target.to_string(), path, format) {
+                    let session = match probe_attach(probe, target.to_string()) {
+                        Ok(session) => session,
+                        Err(_) => {
+                            self.log_text = String::from("Can not attach to target!");
+                            return Command::none();
+                        }
+                    };
+                    match flash_target(session, path, format) {
                         Ok(_) => (),
                         Err(_) => {
                             self.log_text = String::from("Flash failed, Check your file!");
@@ -327,8 +341,13 @@ fn probe_open(probe_id: usize) -> Result<Probe, DebugProbeError> {
 }
 
 
-fn flash_target(probe: Probe, target: String, path: String, format: String) -> Result<(), FileDownloadError> {
-    let mut session = probe.attach(target, Permissions::default()).unwrap();
+fn probe_attach(probe: Probe, target: String) -> Result<Session, probe_rs::Error> {
+    let session = probe.attach(target, Permissions::default())?;
+    Ok(session)
+}
+
+
+fn flash_target(mut session: Session, path: String, format: String) -> Result<(), FileDownloadError> {
     flashing::erase_all(&mut session, None).unwrap();
 
     let _ = match format.as_str() {
@@ -344,8 +363,7 @@ fn flash_target(probe: Probe, target: String, path: String, format: String) -> R
 }
 
 
-fn erase_target(probe: Probe, target: String) -> Result<(), FlashError> {
-    let mut session = probe.attach(target, Permissions::default()).unwrap();
+fn erase_target(mut session: Session) -> Result<(), FlashError> {
     flashing::erase_all(&mut session, None)?;
     return Ok(());
 }
