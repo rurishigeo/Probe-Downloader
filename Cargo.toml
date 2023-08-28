@@ -1,13 +1,21 @@
 [package]
-name = "dap_download"
-version = "0.4.0"
+name = "probe-downloader"
+version = "1.0.0"
 edition = "2021"
+build = "build.rs"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 [profile.release]
 opt-level = 'z'
 lto = true
 
 [dependencies]
+slint = "1.1.1"
+rfd = "0.11.4"
+yaml-rust = "0.4.5"
 probe-rs = "0.20.0"
-iced = "0.10.0"
+
+[build-dependencies]
+slint-build = "1.1.1"
+
+[target.'cfg(windows)'.build-dependencies]
+winres = "0.1"

@@ -1,0 +1,131 @@
+import { Button, VerticalBox, LineEdit, HorizontalBox, ComboBox} from "std-widgets.slint";
+
+component MainWindow inherits Window{
+
+    in-out property <bool> completion_shown;
+    in-out property <[string]> mcu_completion_list;
+
+    in-out property <[string]> probe_list;
+
+    in-out property <string> file_path;
+    in-out property <string> mcu_selected;
+    in-out property <string> probe_selected;
+
+    in-out property <string> erase_log: "擦除";
+    in-out property <string> flash_log: "烧写";
+
+    callback mcu_completion(string);
+    callback mcu_erase;
+    callback mcu_flash;
+
+    callback open_file_select_dialog;
+
+    min-width: 800px;
+    min-height: 480px;
+
+
+    max-width: 800px;
+    max-height: 480px;
+    icon: @image-url("C:/Users/ruri/Projects/Probe-Downloader/installer/icon.png");
+
+
+    VerticalBox {
+        width: 500px;
+        alignment: center;
+        HorizontalBox {
+            Text {
+                text: "调试器：";
+            }
+            ComboBox {
+                current-index: -1;
+                model: root.probe_list;
+                selected(text) => {
+                    root.probe_selected = text;
+                }
+            }
+        }
+
+
+        Rectangle {
+            z: 1; // put on top because of the completion
+            height: 20px;
+            horizontal-stretch: 1;
+            mcu_list := LineEdit {
+                width: 100%;
+                placeholder-text: "输入并选择MCU";
+                accepted(text) => {
+                    root.mcu_selected = text;
+                    root.completion_shown = false;
+                }
+                edited => {
+                    root.mcu_completion(self.text);
+                    root.completion_shown = self.text != "";
+                }
+            }
+            if root.completion_shown : Rectangle {
+                background: white;
+                y: parent.height + 6px;
+                height: min(root.height - mcu_list.y - mcu_list.height - 12px, inner_layout.preferred-height);
+                drop-shadow-color: #8888;
+                drop-shadow-offset-x: 1px;
+                drop-shadow-offset-y: 1px;
+                drop-shadow-blur: 5px;
+                border-radius: 5px;
+                clip: true;
+
+                inner_layout := VerticalBox {
+                    width: 100%;
+                    alignment: end;
+                    for mcu in root.mcu_completion_list: Rectangle {
+                        background: inner_touch.has-hover ? lightgray : transparent;
+                        height: inner_text.height;
+                        inner_text := Text {
+                            y:0;
+                            width: 100%;
+                            text: mcu;
+                            color: black;
+                            overflow: elide;
+                        }
+                        inner_touch := TouchArea {
+                            clicked => {
+                                mcu_list.text = mcu;
+                                root.mcu_selected = mcu;
+                                root.completion_shown = false;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        HorizontalBox {
+            Text {
+                text: "烧录文件路径：";
+            }
+            LineEdit {
+                text: root.file_path;
+            }
+            Button {
+                text: "选择文件";
+                clicked => {
+                    root.open_file_select_dialog();
+                }
+            }
+        }
+        
+        HorizontalBox {
+            Button {
+                text: root.erase_log;
+                clicked => {
+                    root.mcu_erase();
+                }
+            }
+            Button {
+                text: root.flash-log;
+                clicked => {
+                    root.mcu_flash();
+                }
+            }
+        }
+    }
+}

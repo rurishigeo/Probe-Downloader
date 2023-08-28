@@ -1,405 +1,113 @@
-#![windows_subsystem = "windows"]   // 隐藏windows console
+#![windows_subsystem = "windows"] // 隐藏windows console
 
-use std::fmt::Debug;
-use std::path::PathBuf;
+mod probe;
 
-use iced::{executor, Padding};
-use iced::{
-    Alignment, Application, Command, Element, Length, Settings, Subscription,
-    Theme,
-};
-use iced::Event;
-use iced::subscription;
-use iced::widget::{button, Column, combo_box, container, pick_list, Row, text};
-use iced::window;
-use probe_rs::{DebugProbeError, flashing, Permissions, Probe, ProbeCreationError, Session};
-use probe_rs::flashing::{BinOptions, FileDownloadError, FlashError};
+slint::include_modules!();
+use std::fs;
+use std::rc::Rc;
+use rfd::FileDialog;
+use slint::{ModelRc, SharedString, VecModel};
+use std::fs::File;
+use std::io::prelude::*;
+use yaml_rust::YamlLoader;
 
-pub fn main() -> iced::Result {
-    DapDownload::run(Settings {
-        window: window::Settings {
-            size: (800, 480),
-            resizable: false,
-            ..window::Settings::default()
-        },
-        ..Settings::default()
-    })
+fn main() -> Result<(), slint::PlatformError> {
+    let ui = MainWindow::new()?;
+
+    let probe_list : Rc<VecModel<SharedString>> =
+            Rc::new(VecModel::from(string_to_shared_string(probe::list_probe())));
+    let probe_list = ModelRc::from(probe_list.clone());
+    ui.set_probe_list(probe_list);
+
+    let mcu_list = load_file("./mcu");
+
+    let ui_handle = ui.as_weak();
+    ui.on_mcu_completion(move |name_start| {
+        let ui = ui_handle.unwrap();
+        let mcu_completion_list = mcu_completion(name_start.to_string(), mcu_list.clone());
+        let mcu_completion_list : Rc<VecModel<SharedString>> =
+            Rc::new(VecModel::from(string_to_shared_string(mcu_completion_list)));
+        let mcu_completion_list = ModelRc::from(mcu_completion_list.clone());
+        ui.set_mcu_completion_list(mcu_completion_list);
+    });
+
+    let ui_handle = ui.as_weak();
+    ui.on_open_file_select_dialog(move || {
+        let ui = ui_handle.unwrap();
+        ui.set_file_path(file_select_dialog().into());
+    });
+
+    let ui_handle = ui.as_weak();
+    ui.on_mcu_erase(move || {
+        let ui = ui_handle.unwrap();
+        let probe = probe::probe_open(0).unwrap();
+        let session = probe::probe_attach(probe, ui.get_mcu_selected().to_string()).unwrap();
+        let _ = probe::erase_target(session).unwrap();
+        ui.set_erase_log("擦除完成".to_string().into());
+    });
+
+    let ui_handle = ui.as_weak();
+    ui.on_mcu_flash(move || {
+        let ui = ui_handle.unwrap();
+
+        println!("probe: {}", ui.get_probe_selected());
+        println!("mcu: {}", ui.get_mcu_selected());
+        println!("path: {}", ui.get_file_path());
+
+        let probe = probe::probe_open(0).unwrap();
+        let session = probe::probe_attach(probe, ui.get_mcu_selected().to_string()).unwrap();
+        let _ = probe::flash_target(session, ui.get_file_path().to_string(), "elf".to_string()).unwrap();
+        ui.set_flash_log("烧录完成".to_string().into());
+    });
+
+    ui.run()
 }
 
-#[derive(Debug)]
-struct DapDownload {
-    // 烧录器相关参数
-    probe_list: Vec<String>,
-    probe_selected: Option<usize>,
-
-    // 目标芯片相关参数
-    target_list: combo_box::State<TargetMCU>,
-    target_selected: Option<TargetMCU>,
-
-    // 烧录文件相关参数
-    file_path: Option<String>,
-    file_format: Option<String>,
-
-    // 界面相关参数
-    log_text: String,
+fn file_select_dialog() -> String {
+    let files = FileDialog::new()
+        .add_filter("file", &["bin", "hex", "elf"])
+        .pick_file();
+    String::from(files.unwrap().to_str().unwrap())
 }
 
-#[derive(Debug, Clone)]
-enum Message {
-    // 烧录器相关消息
-    ProbeSelected(String),
-    ProbeRefresh,
+fn load_file(path: &str) -> Vec<String> {
 
-    // 目标芯片相关消息
-    TargetSelected(TargetMCU),
+    let mut mcu_list = Vec::new();
 
-    // 烧录文件相关消息
-    FileSelected(PathBuf),
+    for yaml_file in fs::read_dir(path).unwrap() {
+        let yaml_file = yaml_file.unwrap().path();
+        let yaml_file = yaml_file.to_str().unwrap();
+        if yaml_file.ends_with(".yaml") {
+            let mut yaml_file = File::open(yaml_file).expect("Unable to open file");
+            let mut contents = String::new();
+            yaml_file.read_to_string(&mut contents).expect("Unable to read file");
 
-    // 界面相关消息
-    Erase,
-    Flash,
-}
-
-
-impl Application for DapDownload {
-    type Executor = executor::Default;
-    type Message = Message;
-    type Theme = Theme;
-    type Flags = ();
-
-    fn new(_flags: ()) -> (DapDownload, Command<Message>) {
-        (Self {
-            probe_list: list_probe(),
-            probe_selected: match list_probe().len() {
-                0 => None,
-                _ => Some(0),
-            },
-
-            target_list: combo_box::State::new(TargetMCU::ALL.to_vec()),
-            target_selected: None,
-
-            file_path: None,
-            file_format: None,
-
-            log_text: String::from("Drag and drop a file here"),
-        }, {
-             Command::none()
-         })
-    }
-
-    fn title(&self) -> String {
-        String::from("DAP Download")
-    }
-
-    fn update(&mut self, message: Message) -> Command<Message> {
-        match message {
-            Message::ProbeSelected(probe) => {
-                self.probe_selected = Some(self.probe_list.iter().position(|r| r == probe.as_str()).unwrap());
-                Command::none()
-            }
-
-            Message::ProbeRefresh => {
-                self.probe_list = list_probe();
-                self.probe_selected = match list_probe().len() {
-                    0 => None,
-                    _ => Some(0),
-                };
-                Command::none()
-            }
-
-            Message::TargetSelected(target) => {
-                self.target_list.unfocus();
-                self.target_selected = Some(target);
-                Command::none()
-            }
-
-            Message::FileSelected(path) => {
-                self.file_format = match path.extension() {
-                    Some(ext) => {
-                        let ext = ext.to_str().unwrap();
-                        if ext == "bin" || ext == "hex" || ext == "elf" {
-                            self.file_path = Some(path.to_str().unwrap().to_string());
-                            self.log_text = String::from("File loaded");
-                            Some(String::from(ext))
-                        } else {
-                            self.log_text = String::from("Unsupported file format");
-                            self.file_format.clone()
-                        }
-                    }
-                    None => {
-                        self.file_path = Some(path.to_str().unwrap().to_string());
-                        self.log_text = String::from("File loaded");
-                        Some(String::from("elf"))
-                    }
-                };
-                Command::none()
-            }
-
-            Message::Erase => {
-                return if self.probe_selected.is_none() {
-                    self.log_text = String::from("Please select a probe");
-                    Command::none()
-                } else if self.target_selected.is_none() {
-                    self.log_text = String::from("Please select a MCU");
-                    Command::none()
-                } else {
-                    let probe_id = self.probe_selected.unwrap();
-                    let target = self.target_selected.unwrap();
-
-                    let probe = match probe_open(probe_id) {
-                        Ok(probe) => probe,
-                        Err(_) => {
-                            self.log_text = String::from("Probe open failed, Refresh probe list.");
-                            return Command::none();
-                        }
-                    };
-                    let session = match probe_attach(probe, target.to_string()) {
-                        Ok(session) => session,
-                        Err(_) => {
-                            self.log_text = String::from("Can not attach to target!");
-                            return Command::none();
-                        }
-                    };
-                    match erase_target(session) {
-                        Ok(_) => (),
-                        Err(_) => {
-                            self.log_text = String::from("Erase failed!");
-                            return Command::none();
-                        }
-                    };
-                    self.log_text = String::from("Erase done!");
-                    Command::none()
-                };
-            }
-
-            Message::Flash => {
-                return if self.probe_selected.is_none() {
-                    self.log_text = String::from("Please select a probe!");
-                    Command::none()
-                } else if self.target_selected.is_none() {
-                    self.log_text = String::from("Please select a MCU!");
-                    Command::none()
-                } else if self.file_format.is_none() {
-                    self.log_text = String::from("Drag and drop a file here!");
-                    Command::none()
-                } else {
-                    let probe_id = self.probe_selected.unwrap();
-                    let target = self.target_selected.unwrap();
-                    let path = self.file_path.clone().unwrap();
-                    let format = self.file_format.clone().unwrap();
-
-                    let probe = match probe_open(probe_id) {
-                        Ok(probe) => probe,
-                        Err(_) => {
-                            self.log_text = String::from("Probe open failed, Refresh probe list.");
-                            return Command::none();
-                        }
-                    };
-                    let session = match probe_attach(probe, target.to_string()) {
-                        Ok(session) => session,
-                        Err(_) => {
-                            self.log_text = String::from("Can not attach to target!");
-                            return Command::none();
-                        }
-                    };
-                    match flash_target(session, path, format) {
-                        Ok(_) => (),
-                        Err(_) => {
-                            self.log_text = String::from("Flash failed, Check your file!");
-                            return Command::none();
-                        }
-                    }
-                    self.log_text = String::from("Flash done!");
-                    Command::none()
-                };
+            let doc = YamlLoader::load_from_str(&contents).unwrap();
+            let doc = &doc[0];
+            for i in 0..doc["variants"].as_vec().unwrap().len() {
+                let variant = &doc["variants"][i];
+                let name = variant["name"].as_str().unwrap();
+                mcu_list.push(name.to_string());
             }
         }
     }
+    mcu_list
+}
 
-    fn view(&self) -> Element<Message> {
-        let probe_list = pick_list(
-            &self.probe_list,
-            Some({
-                match self.probe_selected {
-                    Some(selected) => self.probe_list.get(selected).unwrap().to_string(),
-                    None => "No probe found".to_string(),
-                }
-            }),
-            Message::ProbeSelected,
-        )
-            .width(150);
-
-        let probe_list_btn = button(
-            text("Ref")
-        )
-            .width(50)
-            .on_press(Message::ProbeRefresh);
-
-        let probe_box = Row::new()
-            .width(200)
-            .align_items(Alignment::Center)
-            .spacing(0)
-            .push(probe_list)
-            .push(probe_list_btn);
-
-        let target_list = combo_box(
-            &self.target_list,
-            "Select a MCU...",
-            self.target_selected.as_ref(),
-            Message::TargetSelected,
-        )
-            .width(200);
-
-        let target_box = Column::new()
-            .width(240)
-            .align_items(Alignment::Center)
-            .spacing(20)
-            .push(probe_box)
-            .push(target_list);
-
-
-        let log = text(self.log_text.clone())
-            .width(200);
-
-        let file_path = text(match self.file_path.clone() {
-            None => "No file selected".to_string(),
-            Some(path) => "Now Loaded: ".to_string() + path.as_str(),
-        })
-            .width(200);
-
-        let path_box = Column::new()
-            .width(240)
-            .align_items(Alignment::Center)
-            .spacing(20)
-            .push(log)
-            .push(file_path);
-
-        let erase_btn = button(
-            text("Erase")
-        )
-            .width(200)
-            .height(50)
-            .padding(Padding::from([13, 80]))
-            .on_press(Message::Erase);
-
-        let flash_btn = button(
-            text("Flash")
-        )
-            .width(200)
-            .height(50)
-            .padding(Padding::from([13, 80]))
-            .on_press(Message::Flash);
-
-        let btn_box = Column::new()
-            .width(240)
-            .align_items(Alignment::Center)
-            .spacing(20)
-            .push(erase_btn)
-            .push(flash_btn);
-
-        let content = Row::new()
-            .align_items(Alignment::Center)
-            .spacing(0)
-            .push(target_box)
-            .push(path_box)
-            .push(btn_box);
-
-        container(content)
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .center_x()
-            .center_y()
-            .into()
+fn string_to_shared_string(string_list: Vec<String>) -> Vec<SharedString> {
+    let mut shared_string_list = Vec::new();
+    for i in 0..string_list.len() {
+        shared_string_list.push(string_list[i].to_string().into());
     }
-
-    fn subscription(&self) -> Subscription<Message> {
-        subscription::events_with(|event, _| match event {
-            Event::Window(window::Event::FileDropped(path)) => {
-                Some(Message::FileSelected(path))
-            }
-            _ => None,
-        })
-    }
+    shared_string_list
 }
 
-// 列出烧录器
-fn list_probe() -> Vec<String> {
-    let mut probe_list: Vec<String> = Vec::new();
-    for probe in Probe::list_all() {
-        probe_list.push(probe.identifier.clone());
-    }
-    probe_list
-}
-
-fn probe_open(probe_id: usize) -> Result<Probe, DebugProbeError> {
-    let probes = Probe::list_all();
-    let probe = probes.get(probe_id)
-        .ok_or(DebugProbeError::ProbeCouldNotBeCreated(ProbeCreationError::NotFound))?
-        .open()?;
-    Ok(probe)
-}
-
-
-fn probe_attach(probe: Probe, target: String) -> Result<Session, probe_rs::Error> {
-    let session = probe.attach(target, Permissions::default())?;
-    Ok(session)
-}
-
-
-fn flash_target(mut session: Session, path: String, format: String) -> Result<(), FileDownloadError> {
-    flashing::erase_all(&mut session, None).unwrap();
-
-    let _ = match format.as_str() {
-        "bin" => flashing::download_file(&mut session, path, flashing::Format::Bin(BinOptions { base_address: None, skip: 0 }))?,
-        "hex" => flashing::download_file(&mut session, path, flashing::Format::Hex)?,
-        "elf" => flashing::download_file(&mut session, path, flashing::Format::Elf)?,
-        _ => (),
-    };
-
-    let mut core = session.core(0).unwrap();
-    core.reset().unwrap();
-    return Ok(());
-}
-
-
-fn erase_target(mut session: Session) -> Result<(), FlashError> {
-    flashing::erase_all(&mut session, None)?;
-    return Ok(());
-}
-
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum TargetMCU {
-    #[default]
-    STM32F103C8,
-    STM32F103CB,
-}
-
-impl TargetMCU {
-    const ALL: [TargetMCU; 2] = [
-        TargetMCU::STM32F103C8,
-        TargetMCU::STM32F103CB,
-    ];
-
-    fn to_string(&self) -> String {
-        match self {
-            TargetMCU::STM32F103C8 => "stm32f103c8".to_string(),
-            TargetMCU::STM32F103CB => "stm32f103cb".to_string(),
+fn mcu_completion(name: String, mcu_list: Vec<String>) -> Vec<String> {
+    let mut mcu_completion_list = Vec::new();
+    for i in 0..mcu_list.len() {
+        if mcu_list[i].to_lowercase().contains(&name.to_lowercase()) {
+            mcu_completion_list.push(mcu_list[i].to_string());
         }
     }
-}
-
-
-impl std::fmt::Display for TargetMCU {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{}",
-            match self {
-                TargetMCU::STM32F103C8 => "stm32f103c8",
-                TargetMCU::STM32F103CB => "stm32f103cb",
-            }
-        )
-    }
+    mcu_completion_list
 }

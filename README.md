@@ -1,14 +1,12 @@
-# DAP Download 调试器下载工具
+# Probe Downloader 调试器下载工具
 
-选择MCU后，拖入固件（支持格式：Bin,Hex,Elf,无后缀名的Elf文件）后即可自动烧录。
-
-MCU暂时只支持STM32F103C8/STM32F103CB，后续会增加更多芯片
+选择MCU后，选择固件（支持格式：Bin,Hex,Elf,无后缀名的Elf文件）后即可烧录。
 
 TODO:
 
 - [ ] 1. Bin支持更改起始烧录地址
 
-- [ ] 2. 支持更多芯片
+- [x] 2. 支持更多芯片
 
 - [x] 3. 增加未选择MCU时的提示
 
